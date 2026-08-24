@@ -1,0 +1,11 @@
+# Large media & model files
+*.mp4
+*.pt
+*.avi
+
+# Python cache & environments
+__pycache__/
+*.py[cod]
+.venv/
+env/
+.streamlit/

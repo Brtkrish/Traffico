@@ -1,0 +1,15 @@
+<configuration>
+    <input>
+        <net-file value="intersection.net.xml"/>
+        <route-files value="intersection_v2.rou.xml"/>
+    </input>
+
+    <time>
+        <begin value="0"/>
+        <end value="600"/>
+    </time>
+
+    <output>
+        <tripinfo-output value="tripinfo.xml"/>
+    </output>
+</configuration>

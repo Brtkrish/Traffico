@@ -8,7 +8,7 @@ A Streamlit dashboard that watches four traffic-camera video feeds, uses YOLOv8 
 ## ✨ Features
 
 - **Real-time vehicle detection** — YOLOv8n (`ultralytics`) detects cars, motorcycles, buses, and trucks per frame.
-- **Polygon ROI counting** — each lane has its own quadrilateral zone; only vehicles whose center falls inside it are counted, so vehicles on other roads or in the distance don't skew the signal.
+- **Polygon ROI counting** — each lane has its own quadrilateral zone; only vehicles whose center falls inside it are counted, so vehicles on other roads or in the distance don't skew the signal.a
 - **Adaptive state machine** — `GREEN → YELLOW → ALL_RED → GREEN …` per lane, with:
   - Green time scaled to vehicle count (`base + count × seconds/vehicle`, capped at a max).
   - A **starvation score** (`vehicle count + wait_time × 0.5`) so a quiet lane that's been waiting a long time still gets picked over a marginally busier one.

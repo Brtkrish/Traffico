@@ -1,0 +1,10 @@
+<configuration>
+    <input>
+        <net-file value="intersection_v7.net.xml"/>
+        <route-files value="intersection_v2.rou.xml"/>
+    </input>
+    <time>
+        <begin value="0"/>
+        <end value="600"/>
+    </time>
+</configuration>

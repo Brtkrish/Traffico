@@ -1,0 +1,41 @@
+<routes>
+    <vType id="car" accel="2.6" decel="4.5" sigma="0.5" length="5" maxSpeed="13.9"/>
+
+    <!-- All three useful movements are represented from every approach. -->
+    <route id="N_to_S" edges="north_in center_out_s"/>
+    <route id="N_to_E" edges="north_in center_out_e"/>
+    <route id="N_to_W" edges="north_in center_out_w"/>
+
+    <route id="S_to_N" edges="south_in center_out_n"/>
+    <route id="S_to_E" edges="south_in center_out_e"/>
+    <route id="S_to_W" edges="south_in center_out_w"/>
+
+    <route id="E_to_W" edges="east_in center_out_w"/>
+    <route id="E_to_N" edges="east_in center_out_n"/>
+    <route id="E_to_S" edges="east_in center_out_s"/>
+
+    <route id="W_to_E" edges="west_in center_out_e"/>
+    <route id="W_to_N" edges="west_in center_out_n"/>
+    <route id="W_to_S" edges="west_in center_out_s"/>
+
+    <!--
+      Total expected arrival rate remains close to the original setup,
+      but all approaches now contain straight/left/right demand.
+      NS is intentionally heavier than EW for the first adaptive test.
+    -->
+    <flow id="flow_N_straight" type="car" route="N_to_S" begin="0" end="600" probability="0.10"/>
+    <flow id="flow_N_left"     type="car" route="N_to_E" begin="0" end="600" probability="0.05"/>
+    <flow id="flow_N_right"    type="car" route="N_to_W" begin="0" end="600" probability="0.03"/>
+
+    <flow id="flow_S_straight" type="car" route="S_to_N" begin="0" end="600" probability="0.10"/>
+    <flow id="flow_S_left"     type="car" route="S_to_W" begin="0" end="600" probability="0.05"/>
+    <flow id="flow_S_right"    type="car" route="S_to_E" begin="0" end="600" probability="0.03"/>
+
+    <flow id="flow_E_straight" type="car" route="E_to_W" begin="0" end="600" probability="0.05"/>
+    <flow id="flow_E_left"     type="car" route="E_to_S" begin="0" end="600" probability="0.02"/>
+    <flow id="flow_E_right"    type="car" route="E_to_N" begin="0" end="600" probability="0.02"/>
+
+    <flow id="flow_W_straight" type="car" route="W_to_E" begin="0" end="600" probability="0.05"/>
+    <flow id="flow_W_left"     type="car" route="W_to_N" begin="0" end="600" probability="0.02"/>
+    <flow id="flow_W_right"    type="car" route="W_to_S" begin="0" end="600" probability="0.02"/>
+</routes>

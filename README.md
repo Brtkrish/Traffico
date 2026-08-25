@@ -1,188 +1,624 @@
-# 🚥 4-Way Adaptive Signal Controller
+# 🚦 Trafico
+## Explainable Adaptive Traffic-Signal Control with YOLOv8 + SUMO
 
-A Streamlit dashboard that watches four traffic-camera video feeds, uses YOLOv8 to count vehicles inside a per-lane region of interest (ROI), and drives a live green/yellow/all-red state machine — automatically prioritizing the busiest or longest-waiting lane, or letting an operator lock a lane manually.
+Trafico is an end-to-end traffic-signal research prototype that combines **computer vision, adaptive control, and microscopic traffic simulation**.
 
+The project is built around a simple engineering question:
 
----
+> **Can an adaptive traffic controller make a four-leg intersection handle changing traffic demand better than a conventional fixed-time controller?**
 
-## ✨ Features
+The answer is evaluated in two layers:
 
-- **Real-time vehicle detection** — YOLOv8n (`ultralytics`) detects cars, motorcycles, buses, and trucks per frame.
-- **Polygon ROI counting** — each lane has its own quadrilateral zone; only vehicles whose center falls inside it are counted, so vehicles on other roads or in the distance don't skew the signal.a
-- **Adaptive state machine** — `GREEN → YELLOW → ALL_RED → GREEN …` per lane, with:
-  - Green time scaled to vehicle count (`base + count × seconds/vehicle`, capped at a max).
-  - A **starvation score** (`vehicle count + wait_time × 0.5`) so a quiet lane that's been waiting a long time still gets picked over a marginally busier one.
-  - A **minimum green lock** so the AI can't cut a phase unrealistically short.
-- **Manual override mode** — pin the green light to a specific lane for operator control or testing.
-- **Live dashboard**
-  - Control-tower header bar (clock, uptime, update rate, active lane, run/pause badge).
-  - Animated top-down intersection diagram with per-lane signal lights and live counts.
-  - Countdown ring for the current phase.
-  - Per-lane status cards and annotated video feeds with ROI overlays.
-  - **Analytics tab** — rolling vehicle-count history chart + summary metrics.
-  - **Logs tab** — timestamped record of every lane switch.
-- **Live-tunable controls** — confidence threshold, timing parameters, and frame-skip rate all take effect immediately (no restart needed) via `st.fragment`.
-- **Start/Stop control** — the app doesn't touch your video files or GPU until you flip it on.
+- **YOLOv8 + Streamlit** demonstrates perception and live adaptive decision-making from traffic-camera footage.
+- **SUMO** provides the controlled environment used to measure whether the adaptive policy actually improves traffic performance.
+
+This separation is deliberate: the camera videos are pre-recorded, so they can demonstrate detection and control decisions, while SUMO provides the quantitative closed-loop performance evaluation.
 
 ---
 
-## 🧰 Tech Stack
+# ✨ Why this project is interesting
 
-| Component        | Purpose                                  |
-|-------------------|-------------------------------------------|
-| Streamlit         | Web dashboard / UI                        |
-| Ultralytics YOLOv8 | Vehicle detection (`yolov8n.pt`)          |
-| OpenCV (`cv2`)    | Video I/O, ROI point-in-polygon test, drawing overlays |
-| NumPy             | Polygon coordinate arrays                 |
-| Pandas            | Analytics history → chart data            |
+A fixed-time signal assumes that traffic demand is reasonably predictable:
 
----
-
-## 📦 Prerequisites
-
-- Python 3.9+
-- A GPU is optional but recommended for smoother real-time inference (CPU works fine at a lower frame rate / with a higher "process every Nth frame" setting).
-- Four video files representing each approach to the junction.
-
-Install dependencies:
-
-```bash
-pip install streamlit opencv-python numpy pandas ultralytics
+```text
+NS → 30 s green
+EW → 30 s green
+NS → 30 s green
+EW → 30 s green
+...
 ```
 
-> The first run will auto-download `yolov8n.pt` (~6 MB) via Ultralytics.
+That wastes green time when one approach is nearly empty and the other is congested.
+
+Trafico instead estimates current demand and adapts the phase:
+
+```text
+                 Traffic cameras
+                        │
+                        ▼
+                  YOLOv8 detection
+                        │
+                        ▼
+             Vehicle count + tracking
+                        │
+                        ▼
+          Persistent queue estimation
+                        │
+                        ▼
+              Adaptive NS / EW score
+                        │
+                        ▼
+             Green / Yellow / All-Red
+                        │
+                        ▼
+               Next signal phase
+```
+
+The controller also includes **fairness protection** so a quieter side cannot wait indefinitely.
 
 ---
 
-## 🎥 Video Setup
+# 🧠 System architecture
 
-Place four video files in the **same folder as the script**, named:
-
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                    COMPUTER VISION LAYER                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  North video ─┐                                             │
+│  South video ─┼──► YOLOv8 ─► ROI filtering ─► tracking     │
+│  East video  ─┤                         │                   │
+│  West video  ─┘                         ▼                   │
+│                               stopped / queue estimates    │
+│                                                             │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     CONTROL LAYER                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  NS demand = vehicles + queue pressure + red waiting       │
+│  EW demand = vehicles + queue pressure + red waiting       │
+│                                                             │
+│  v4.1 adds:                                                │
+│    • minimum green                           │
+│    • maximum green                           │
+│    • queue-clearing logic                    │
+│    • switching hysteresis                    │
+│    • starvation protection                   │
+│                                                             │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
+                ┌───────────────┴───────────────┐
+                ▼                               ▼
+       Streamlit dashboard                 SUMO / TraCI
+                │                               │
+                ▼                               ▼
+       live explanation of             closed-loop performance
+       what the controller sees       and objective comparison
 ```
+
+---
+
+# 🚥 Signal-control model
+
+The final validated SUMO controller is **Adaptive v4.1**.
+
+The intersection uses two safe signal groups:
+
+```text
+NS phase
+  North + South GREEN
+  East + West RED
+
+EW phase
+  East + West GREEN
+  North + South RED
+```
+
+This is intentional.
+
+The simulated intersection has **one incoming lane per approach**, so splitting left turns into separate protected phases created additional yellow/clearance overhead without improving the tested results. Experimental protected-left versions were evaluated and rejected.
+
+## Demand scoring
+
+The controller combines three ideas:
+
+### 1. Current demand
+
+More vehicles increase the priority of a phase.
+
+### 2. Queue pressure
+
+Stopped vehicles are more urgent than vehicles that are already moving.
+
+### 3. Fairness / starvation protection
+
+A phase that remains red accumulates waiting pressure and eventually receives priority.
+
+Conceptually:
+
+```text
+phase_score =
+    vehicle_demand
+    + queue_pressure
+    + red_wait_pressure
+```
+
+The selected phase receives a green duration bounded by minimum and maximum limits.
+
+---
+
+# 🛡️ Why v4.1 instead of simply "pick the busiest side"
+
+Early experiments showed that a naive adaptive controller can switch too aggressively.
+
+So v4.1 introduced **phase stability / hysteresis**:
+
+```text
+Small demand difference
+        ↓
+     HOLD
+
+Large persistent difference
+        ↓
+     SWITCH
+```
+
+It also evaluates whether the current phase is still clearing its queue.
+
+This avoids a controller that repeatedly behaves like:
+
+```text
+NS → EW → NS → EW → NS → EW
+```
+
+because of small fluctuations in detected demand.
+
+---
+
+# 👁️ Computer-vision pipeline
+
+The Streamlit application uses four pre-recorded camera feeds:
+
+```text
 north.mp4
 south.mp4
 east.mp4
 west.mp4
 ```
 
-Each video should be a fixed camera angle looking at one approach of the intersection. Videos loop automatically when they reach the end.
+Each camera has a calibrated polygonal ROI.
 
-### ROI Calibration
+Only detections whose center falls inside the ROI contribute to the approach demand.
 
-The four lane detection zones are hardcoded as pixel-coordinate polygons at the top of the script:
+## Detection classes
 
-```python
-roi_polygons = {
-    "North": np.array([[643, 390], [460, 694], [870, 705], [693, 394]], np.int32),
-    "South": np.array([[236, 714], [895, 237], [1066, 237], [1270, 706]], np.int32),
-    "East":  np.array([[251, 711], [758, 382], [1097, 364], [1171, 710]], np.int32),
-    "West":  np.array([[44, 493], [463, 231], [720, 229], [951, 520]], np.int32),
-}
+YOLOv8 is configured to detect:
+
+- cars
+- motorcycles
+- buses
+- trucks
+
+## Tracking
+
+A lightweight centroid tracker associates detections between processed frames.
+
+Each track can be classified as:
+
+```text
+MOVE
+STOP
+QUEUE
 ```
 
-⚠️ **These coordinates are tuned for a specific frame resolution.** If your videos are a different resolution (or you swap footage), you'll need to re-draw these polygons.
+The queue estimate is deliberately conservative:
 
-#### Recalibrating with `coordinate_finder.py`
-
-The project includes a small helper script, `coordinate_finder.py`, for this exact purpose — it opens a video frame and lets you click four points to trace a lane's ROI, printing the pixel coordinates to the terminal as you go.
-
-1. Open `coordinate_finder.py` and point it at the lane you're calibrating:
-   ```python
-   cap = cv2.VideoCapture("west.mp4")  # swap for north.mp4 / south.mp4 / east.mp4
-   ```
-2. Run it:
-   ```bash
-   python coordinate_finder.py
-   ```
-3. A window titled **"Click 4 points of your lane"** opens on the first frame. Click the **four corners of that lane's detection zone**, in order around the perimeter (don't skip across the shape — go corner to corner, either clockwise or counter-clockwise) so the resulting polygon is valid and non-self-intersecting.
-4. Each click prints a `[x, y]` pair to the terminal and drops a green dot on the frame so you can see what you've traced. After the 4th click, press any key to close the window.
-5. Copy the four printed pairs into the corresponding lane entry in `roi_polygons` inside `traffic_controller.py`:
-   ```python
-   "West": np.array([[44, 493], [463, 231], [720, 229], [951, 520]], np.int32),
-   ```
-6. Repeat steps 1–5 for the other three lanes (`north.mp4`, `south.mp4`, `east.mp4`).
-
-> Tip: calibrate against a frame where traffic is light, so you can clearly see the lane markings/edges you're tracing without vehicles in the way.
-
----
-
-## ▶️ Running the App
-
-```bash
-streamlit run traffic_controller.py
+```text
+YOLO detection
+      ↓
+stable track
+      ↓
+low motion confirmed
+      ↓
+persistent stop confirmed
+      ↓
+queue member
 ```
 
-Then open the local URL Streamlit prints (usually `http://localhost:8501`).
-
-1. In the sidebar, choose **Automated Adaptive (AI)** or **Manual Lane Override**.
-2. Adjust confidence threshold / timing parameters / frame-skip as needed — changes apply live.
-3. Flip **▶️ Run Junction** on to start processing.
-4. Watch the **Live View** tab for real-time state, or check **Analytics** / **Logs** for history.
+This is more robust than treating every detected vehicle as a queue.
 
 ---
 
-## ⚙️ Configuration Reference
+# 🎛️ Decision smoothing for video noise
 
-| Control                     | Default | Description |
-|------------------------------|---------|-------------|
-| Model Confidence Threshold   | 0.40    | Minimum YOLO detection confidence to count a vehicle |
-| Base Green Time              | 8.0 s   | Green duration with zero detected vehicles |
-| Extra Seconds / Vehicle      | 1.5 s   | Added per vehicle detected in the ROI at switch-in |
-| Max Green Time               | 35.0 s  | Hard cap on green duration |
-| Yellow Time                  | 3.0 s   | Fixed clearance phase |
-| All-Red Buffer               | 2.0 s   | Fixed all-directions-red safety phase |
-| Minimum Green Lock           | 5.0 s   | Floor below which the AI cannot cut a green phase short |
-| Process every Nth frame      | 1       | Run inference every frame (1) or skip frames to save compute |
+Real camera detections fluctuate.
 
----
+A vehicle can disappear for a frame or two, and detection confidence can change.
 
-## 🧠 How Lane Selection Works (Automated Mode)
+The camera controller therefore does not immediately switch phases because of one low-count observation.
 
-At the end of each green phase, every *other* lane gets a score:
+Instead:
 
-```
-score(lane) = current_vehicle_count(lane) + 0.5 × seconds_waited(lane)
+```text
+Low demand observation #1 → HOLD
+Low demand observation #2 → HOLD
+Low demand observation #3 → CONFIRM
+                         → SWITCH
 ```
 
-The lane with the highest score becomes the next green. This balances two goals:
+A short post-switch hold also prevents immediate reversals.
 
-- **Throughput** — busier lanes get priority.
-- **Fairness** — a lane that's been sitting red for a long time will eventually out-score a busier one, preventing starvation.
+This makes the camera-side behavior more stable and easier to interpret.
 
 ---
 
-## 📁 Project Structure
+# 🖥️ Streamlit dashboard
 
+The live dashboard exposes:
+
+- active NS/EW phase;
+- countdown timer;
+- North / South / East / West vehicle counts;
+- estimated queues;
+- stopped vehicles;
+- per-camera tracking overlays;
+- phase-switch logs;
+- demand history / analytics.
+
+Example decision log:
+
+```text
+NS → EW
+NS = 8 vehicles
+EW = 25 vehicles
+reason = PERSISTENT_OPPOSING_DEMAND
 ```
-.
-├── traffic_controller.py   # Main Streamlit app
-├── coordinate_finder.py     # Helper: click 4 points on a frame to get ROI polygon coords
-├── north.mp4                # Video feed — North approach
-├── south.mp4                # Video feed — South approach
-├── east.mp4                 # Video feed — East approach
-├── west.mp4                 # Video feed — West approach
-├── yolov8n.pt                # YOLOv8 weights (auto-downloaded on first run if missing)
-└── README.md
+
+That makes the adaptive decision explainable instead of presenting the controller as a black box.
+
+---
+
+# 🧪 SUMO validation methodology
+
+The camera system demonstrates perception and adaptive decisions.
+
+**SUMO is the performance experiment.**
+
+The validation compares:
+
+```text
+Fixed-time controller
+        VS
+Adaptive v4.1
+```
+
+under the same:
+
+- network;
+- route demand;
+- simulation duration;
+- random seed.
+
+## Reproducible seeds
+
+Five seeds were used:
+
+```text
+42
+43
+44
+45
+46
+```
+
+A seed determines the reproducible random traffic realization in SUMO.
+
+For every seed:
+
+```text
+Seed 42 ─┬─ Fixed-time
+         └─ Adaptive v4.1
+
+Seed 43 ─┬─ Fixed-time
+         └─ Adaptive v4.1
+
+...
+```
+
+This paired design makes the comparison substantially fairer than comparing two unrelated traffic runs.
+
+---
+
+# 📊 Final five-seed results
+
+## Mean across seeds 42–46
+
+| Metric | Fixed-time | Adaptive v4.1 | Improvement |
+|---|---:|---:|---:|
+| Vehicles completed | 218.40 | **292.20** | **+33.8%** |
+| Average waiting time | 35.67 s | **32.15 s** | **−9.9%** |
+| Median waiting time | **22.50 s** | 24.50 s | +8.9% |
+| Maximum waiting time | 268.20 s | **113.80 s** | **−57.6%** |
+| Average trip duration | **87.40 s** | 102.01 s | +16.7% |
+| Average time lost | **57.08 s** | 71.65 s | +25.5% |
+
+## What the results actually show
+
+The adaptive controller achieved:
+
+### ✅ Higher throughput
+
+```text
+218.4 → 292.2 vehicles
+```
+
+approximately **33.8% more completed vehicles**.
+
+### ✅ Lower average waiting
+
+```text
+35.67 s → 32.15 s
+```
+
+approximately **9.9% lower average waiting**.
+
+### ✅ Much lower worst-case waiting
+
+```text
+268.2 s → 113.8 s
+```
+
+approximately **57.6% lower maximum waiting**.
+
+### ⚠️ Important trade-off
+
+Average trip duration and time loss increased.
+
+That means the adaptive controller is **not universally better on every metric**.
+
+A defensible interpretation is:
+
+> Adaptive v4.1 improved throughput and reduced average and worst-case waiting under the tested scenarios, but this came with a travel-efficiency trade-off reflected in higher average trip duration and time loss.
+
+That trade-off is an important part of the result rather than something to hide.
+
+---
+
+# 🔬 Experiments that were tested and rejected
+
+The project was developed iteratively rather than stopping at the first working controller.
+
+## v4
+
+Established the successful two-phase adaptive baseline.
+
+## v5
+
+Attempted to reduce phase switching.
+
+Result: travel efficiency improved on one controlled test, but throughput and waiting performance deteriorated.
+
+**Rejected.**
+
+## v6
+
+Added movement-aware straight / left / right information to the demand score.
+
+Result: movement information alone did not improve the overall performance.
+
+**Rejected.**
+
+## v7
+
+Added protected left-turn phases.
+
+Result: the additional phase/clearance overhead performed dramatically worse for this one-lane-per-approach intersection.
+
+**Rejected.**
+
+## v4.2
+
+Added stronger anti-switching restrictions.
+
+Result: reduced switching too aggressively and allowed queues to build.
+
+**Rejected.**
+
+This experimentation led to v4.1 being retained as the best validated trade-off.
+
+---
+
+# 🧩 Final project structure
+
+Recommended final structure:
+
+```text
+Trafico/
+│
+├── traffic_controller_v41_tracking_v3.py
+├── adaptive_controller_v4_1.py
+├── fixed_time_controller.py
+├── analyze_results_v2.py
+├── coordinate_finder.py
+│
+├── intersection.net.xml
+├── intersection.sumocfg
+├── intersection_v2.rou.xml
+│
+├── north.mp4
+├── south.mp4
+├── east.mp4
+├── west.mp4
+│
+├── yolov8n.pt
+├── README.md
+│
+└── results/
+    ├── fixed_seed42.xml
+    ├── fixed_seed43.xml
+    ├── fixed_seed44.xml
+    ├── fixed_seed45.xml
+    ├── fixed_seed46.xml
+    ├── adaptive_v41_seed42.xml
+    ├── adaptive_v41_seed43.xml
+    ├── adaptive_v41_seed44.xml
+    ├── adaptive_v41_seed45.xml
+    ├── adaptive_v41_seed46.xml
+    └── Trafico_Final_Validation.xlsx
+```
+
+Experimental implementations should be moved to an `archive/` directory rather than kept in the main project root.
+
+---
+
+# ▶️ Running the project
+
+## Camera / Streamlit
+
+Install dependencies:
+
+```powershell
+pip install streamlit opencv-python numpy pandas ultralytics
+```
+
+Run:
+
+```powershell
+streamlit run traffic_controller_v41_tracking_v3.py
+```
+
+Use:
+
+```text
+Automated Adaptive (AI)
+```
+
+and enable:
+
+```text
+Run Junction
 ```
 
 ---
 
-## 🛠️ Troubleshooting
+## SUMO fixed-time baseline
 
-| Issue | Likely Cause / Fix |
-|-------|---------------------|
-| "Could not open these video files" error on load | Video files aren't in the same folder as the script, or are named incorrectly |
-| Vehicles not being counted | ROI polygon doesn't match your video's resolution/framing — recalibrate coordinates |
-| Sliders/mode changes don't seem to do anything | Make sure **Run Junction** is toggled on — some effects only appear on the next detection/state tick |
-| Low frame rate / laggy UI | Increase **Process every Nth frame**, lower Streamlit's fragment refresh isn't configurable directly but reducing detection frequency helps most |
-| SVG/diagram shows as raw text instead of rendering | Fixed in current version — HTML/SVG strings are stripped of leading whitespace before being passed to `st.markdown` (a Markdown parser quirk where indented lines are treated as code blocks) |
+```powershell
+python fixed_time_controller.py --gui --tripinfo-output fixed_seed42.xml --max-steps 600
+```
 
 ---
 
-## ⚠️ Notes & Limitations
+## SUMO Adaptive v4.1
 
-- This is a research/demo tool, not a certified traffic-control system — timing logic and detection are illustrative, not safety-rated.
-- Detection quality depends entirely on camera angle, lighting, and ROI accuracy.
-- `yolov8n` is the smallest/fastest YOLOv8 variant; swap in `yolov8s.pt` or larger for better accuracy at the cost of speed.
+```powershell
+python adaptive_controller_v4_1.py --gui --tripinfo-output adaptive_v41_seed42.xml --seed 42
+```
+
+Analyze:
+
+```powershell
+python analyze_results_v2.py --file adaptive_v41_seed42.xml
+```
+
+Change the seed to repeat the experiment:
+
+```powershell
+python adaptive_controller_v4_1.py --gui --tripinfo-output adaptive_v41_seed43.xml --seed 43
+```
 
 ---
+
+# ⚙️ Configuration
+
+The camera controller exposes parameters including:
+
+| Parameter | Purpose |
+|---|---|
+| Confidence threshold | Minimum YOLO confidence used for detections |
+| Base green time | Minimum demand-driven green allocation |
+| Extra seconds / vehicle | Green extension based on demand |
+| Maximum green | Prevents one phase from monopolizing the intersection |
+| Yellow time | Clearance between phases |
+| All-red buffer | Safety clearance interval |
+| Minimum green lock | Prevents unrealistically short greens |
+| Frame skip | Controls inference frequency |
+
+ROI coordinates are camera-specific and can be recalibrated with:
+
+```text
+coordinate_finder.py
+```
+
+---
+
+# ⚠️ Limitations
+
+This is a **research and demonstration system**, not a certified traffic controller.
+
+Important limitations include:
+
+- camera feeds are pre-recorded;
+- ROI calibration depends on camera viewpoint;
+- lightweight tracking can fail under heavy occlusion;
+- queue estimation is heuristic;
+- pixel-motion based speed estimation is camera-dependent;
+- the SUMO intersection is a simplified single-intersection model;
+- the results apply to the tested network and demand rather than all real intersections;
+- real deployment would require safety-certified signal hardware, robust tracking, calibrated cameras, and fail-safe control logic.
+
+---
+
+# 🚀 Future research directions
+
+Natural next steps include:
+
+### Better perception
+- stronger multi-object tracking;
+- camera calibration and perspective normalization;
+- more robust occlusion handling;
+- real-time live camera feeds.
+
+### Better traffic understanding
+- per-vehicle waiting time;
+- turn-movement classification;
+- lane-level demand;
+- arrival-rate prediction.
+
+### Better control
+- model-predictive signal control;
+- learned demand forecasting;
+- multi-intersection coordination;
+- dedicated turn lanes with protected-turn phases.
+
+### Better validation
+- larger route networks;
+- more traffic scenarios;
+- peak/off-peak demand profiles;
+- repeated stochastic experiments;
+- comparisons against additional signal-control baselines.
+
+---
+
+# 📌 Project conclusion
+
+Trafico demonstrates a complete adaptive traffic-control pipeline:
+
+```text
+Perception
+   ↓
+Tracking
+   ↓
+Queue estimation
+   ↓
+Explainable adaptive control
+   ↓
+Simulation validation
+```
+
+The final experiments show that Adaptive v4.1 can improve **throughput and waiting-time performance** relative to the fixed-time baseline under the tested SUMO scenarios, while also revealing a meaningful **travel-time trade-off**.
+
+That makes the project more than a vehicle-counting demo: it is a complete prototype connecting **computer vision → control decisions → quantitative traffic simulation**.
